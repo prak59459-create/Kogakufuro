@@ -63,7 +63,7 @@ class OpticalFlowGL {
     const gl = this.gl;
     width = Math.max(8, width | 0);
     height = Math.max(8, height | 0);
-    levels = Math.max(1, Math.min(8, levels | 0));
+    levels = Math.max(1, Math.min(10, levels | 0));
     if (this.width === width && this.height === height && this.levels === levels) return false;
     this._dispose();
     this.width = width;

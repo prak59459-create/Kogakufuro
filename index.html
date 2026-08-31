@@ -119,8 +119,8 @@
 
         <div class="field">
           <label><span data-i18n="procScale">処理解像度スケール</span>: <span id="procScaleVal">100%</span></label>
-          <input type="range" id="procScale" class="range" min="15" max="100" value="100" step="5">
-          <div class="hint small" data-i18n="procScaleHint">下げるほど高速化（1000fps級のステップ解析にはスケールを下げるのがおすすめ）</div>
+          <input type="range" id="procScale" class="range" min="2" max="100" value="100" step="1">
+          <div class="hint small" data-i18n="procScaleHint">計算だけを縮小し、表示・書き出しは元映像に近い解像度を保ちます。下げるほど高速化(1000fps級のステップ解析にはスケールを下げるのがおすすめ)</div>
         </div>
       </section>
 
@@ -130,9 +130,11 @@
         <div class="field">
           <label data-i18n="preset">プリセット</label>
           <select id="algoPreset" class="select">
-            <option value="balanced" data-i18n="presetBalanced">バランス</option>
+            <option value="turbo" data-i18n="presetTurbo">爆速(超高速)</option>
             <option value="fast" data-i18n="presetFast">高速</option>
+            <option value="balanced" data-i18n="presetBalanced" selected>バランス</option>
             <option value="precise" data-i18n="presetPrecise">高精度</option>
+            <option value="ultraPrecise" data-i18n="presetUltraPrecise">超高精度</option>
             <option value="fluid" data-i18n="presetFluid">流体・煙</option>
             <option value="sports" data-i18n="presetSports">スポーツ / スローモーション</option>
             <option value="custom" data-i18n="presetCustom">カスタム</option>
@@ -140,15 +142,15 @@
         </div>
         <div class="field">
           <label><span data-i18n="alpha">平滑化の強さ α</span>: <span id="alphaVal">0.05</span></label>
-          <input type="range" id="alpha" class="range" min="0.005" max="0.4" value="0.05" step="0.005">
+          <input type="range" id="alpha" class="range" min="0.001" max="1" value="0.05" step="0.001">
         </div>
         <div class="field">
           <label><span data-i18n="iterations">反復回数</span>: <span id="itersVal">40</span></label>
-          <input type="range" id="iterations" class="range" min="5" max="150" value="40" step="1">
+          <input type="range" id="iterations" class="range" min="1" max="500" value="40" step="1">
         </div>
         <div class="field">
           <label><span data-i18n="pyrLevels">ピラミッド段数</span>: <span id="levelsVal">4</span></label>
-          <input type="range" id="pyrLevels" class="range" min="1" max="7" value="4" step="1">
+          <input type="range" id="pyrLevels" class="range" min="1" max="10" value="4" step="1">
         </div>
       </section>
 

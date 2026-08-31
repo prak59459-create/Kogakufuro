@@ -210,9 +210,14 @@ const SHADERS = (() => {
   // Arbitrary-size resample of the flow field (manual bilinear via texelFetch,
   // no magnitude rescale) — used to read back a small vector grid to the CPU
   // for arrow / particle overlays without depending on float-linear filtering.
+  // u_scale converts the sampled displacement into the caller's pixel units:
+  // 1.0 for a same-scale readback grid, or (outputRes/computeRes) when this is
+  // used to project a small compute-resolution flow field onto a much larger
+  // output canvas (so magnitudes stay correct in the larger pixel grid).
   const FRAG_RESAMPLE_FLOW = PRECISION + `
   uniform sampler2D u_src;
   uniform ivec2 u_srcSize;
+  uniform float u_scale;
   in vec2 v_uv;
   out vec4 outColor;
   void main() {
@@ -230,7 +235,7 @@ const SHADERS = (() => {
     vec2 v0 = mix(v00, v10, f.x);
     vec2 v1 = mix(v01, v11, f.x);
     vec2 v = mix(v0, v1, f.y);
-    outColor = vec4(v, 0.0, 1.0);
+    outColor = vec4(v * u_scale, 0.0, 1.0);
   }
   `;
 

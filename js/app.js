@@ -8,12 +8,18 @@
 
 const $ = (id) => document.getElementById(id);
 
+// `scale` (0-1) is the compute-resolution knob (see ensureProcSizing) — the
+// rendered/exported output always stays near the source resolution regardless
+// of how low this goes, so turbo trades *internal* detail for raw speed, not
+// visual sharpness.
 const PRESETS = {
-  fast: { alpha: 0.08, iterations: 15, levels: 3 },
-  balanced: { alpha: 0.05, iterations: 40, levels: 4 },
-  precise: { alpha: 0.03, iterations: 80, levels: 5 },
-  fluid: { alpha: 0.15, iterations: 60, levels: 5 },
-  sports: { alpha: 0.02, iterations: 30, levels: 3 },
+  turbo: { alpha: 0.12, iterations: 4, levels: 2, scale: 0.20 },
+  fast: { alpha: 0.08, iterations: 15, levels: 3, scale: 0.5 },
+  balanced: { alpha: 0.05, iterations: 40, levels: 4, scale: 1.0 },
+  precise: { alpha: 0.03, iterations: 80, levels: 5, scale: 1.0 },
+  ultraPrecise: { alpha: 0.01, iterations: 250, levels: 6, scale: 1.0 },
+  fluid: { alpha: 0.15, iterations: 60, levels: 5, scale: 1.0 },
+  sports: { alpha: 0.02, iterations: 30, levels: 3, scale: 0.6 },
 };
 
 const state = {
@@ -67,11 +73,15 @@ const state = {
   recording: { active: false, recorder: null, chunks: [], compositeCanvas: null, compositeCtx: null, track: null },
 
   rafHandle: null,
-  procW: 0, procH: 0,
+  procW: 0, procH: 0,   // internal compute resolution (speed knob, can be tiny)
+  outW: 0, outH: 0,     // output/display resolution (kept as close to the source as possible)
+  outScale: 1,          // outW/procW — converts compute-resolution flow values to output-resolution units
 };
 
+const MAX_OUTPUT_DIM = 2048; // sanity cap so a 4K/8K source can't blow up GPU memory
+
 let gl, glCanvas, overlayCanvas, overlayCtx, roiCanvas, roiCtx, canvasWrap;
-let flow, viz, particles, procCanvas, procCtx;
+let flow, viz, particles, procCanvas, procCtx, dispCanvas, dispCtx, dispRawTarget;
 
 // ===================== INIT =====================
 
@@ -101,6 +111,9 @@ function init() {
 
   procCanvas = document.createElement('canvas');
   procCtx = procCanvas.getContext('2d', { willReadFrequently: false });
+  dispCanvas = document.createElement('canvas');
+  dispCtx = dispCanvas.getContext('2d', { willReadFrequently: false });
+  dispRawTarget = GLU.createTarget(gl, 8, 8, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
 
   const savedTheme = localStorage.getItem('kogakufuro-theme');
   if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
@@ -322,16 +335,12 @@ async function loadImageSlot(slot, file) {
 function computeImagePair() {
   if (!state.imgA || !state.imgB) { toast(I18N.t('toastImagesNeedBoth'), true); return; }
   ensureProcSizing(state.imgA.naturalWidth, state.imgA.naturalHeight);
-  drawToProc(state.imgA);
-  flow.uploadFrame(procCanvas);
-  drawToProc(state.imgB);
-  flow.uploadFrame(procCanvas);
+  captureFrame(state.imgA);
+  captureFrame(state.imgB);
   state.imagesReady = true;
   state.hasFrameA = true;
   const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
-  const t0 = performance.now();
-  renderVisualization(flowTex);
-  updateOverlayAndStats(flowTex, performance.now() - t0);
+  presentFrame(flowTex);
 }
 
 // ===================== SIZING / FIT =====================
@@ -350,21 +359,38 @@ function ensureProcSizing(srcW, srcH) {
   const roi = state.roi || { x: 0, y: 0, w: 1, h: 1 };
   const sw = Math.max(1, Math.round(roi.w * srcW));
   const sh = Math.max(1, Math.round(roi.h * srcH));
+
+  // Compute resolution: the actual size the GPU solver runs at (the speed knob).
   const pw = Math.max(8, Math.round(sw * state.procScale));
   const ph = Math.max(8, Math.round(sh * state.procScale));
+
+  // Output resolution: kept as close to the source/ROI as possible (capped only
+  // to protect GPU memory on very large sources) so the *rendered* result stays
+  // sharp even when procScale is cranked down for speed.
+  const outCapScale = Math.min(1, MAX_OUTPUT_DIM / Math.max(sw, sh));
+  const ow = Math.max(pw, Math.round(sw * outCapScale));
+  const oh = Math.max(ph, Math.round(sh * outCapScale));
+
   if (procCanvas.width !== pw || procCanvas.height !== ph) {
     procCanvas.width = pw;
     procCanvas.height = ph;
   }
-  if (glCanvas.width !== pw || glCanvas.height !== ph) {
-    glCanvas.width = pw; glCanvas.height = ph;
-    overlayCanvas.width = pw; overlayCanvas.height = ph;
-    roiCanvas.width = pw; roiCanvas.height = ph;
+  if (dispCanvas.width !== ow || dispCanvas.height !== oh) {
+    dispCanvas.width = ow;
+    dispCanvas.height = oh;
+  }
+  if (glCanvas.width !== ow || glCanvas.height !== oh) {
+    glCanvas.width = ow; glCanvas.height = oh;
+    overlayCanvas.width = ow; overlayCanvas.height = oh;
+    roiCanvas.width = ow; roiCanvas.height = oh;
+    GLU.resizeTarget(gl, dispRawTarget, ow, oh);
   }
   const resized = flow.setSize(pw, ph, state.algo.levels);
   if (resized) state.hasFrameA = false;
   state.procW = pw; state.procH = ph;
-  $('statRes').textContent = `${pw}×${ph}`;
+  state.outW = ow; state.outH = oh;
+  state.outScale = ow / pw;
+  $('statRes').textContent = (pw === ow && ph === oh) ? `${ow}×${oh}` : `${ow}×${oh} (${I18N.t('statResCompute')}: ${pw}×${ph})`;
   return [pw, ph];
 }
 
@@ -389,11 +415,22 @@ function fitCanvasToContainer(forceReflow) {
 
 // ===================== FRAME PIPELINE =====================
 
-function drawToProc(source) {
+/**
+ * Draw one source frame into the full-resolution display buffer, downsample a
+ * copy into the (possibly much smaller) compute buffer, and upload both to the
+ * GPU: the small one drives the flow solver, the full-res one is what "source"
+ * / "blend" / "split" visualization and PNG export actually show.
+ */
+function captureFrame(source) {
   const roi = state.roi || { x: 0, y: 0, w: 1, h: 1 };
   const [srcW, srcH] = currentSourceSize();
   const sx = roi.x * srcW, sy = roi.y * srcH, sw = roi.w * srcW, sh = roi.h * srcH;
-  procCtx.drawImage(source, sx, sy, sw, sh, 0, 0, procCanvas.width, procCanvas.height);
+  dispCtx.drawImage(source, sx, sy, sw, sh, 0, 0, dispCanvas.width, dispCanvas.height);
+  procCtx.drawImage(dispCanvas, 0, 0, dispCanvas.width, dispCanvas.height, 0, 0, procCanvas.width, procCanvas.height);
+  flow.uploadFrame(procCanvas);
+  gl.bindTexture(gl.TEXTURE_2D, dispRawTarget.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, dispCanvas);
+  gl.bindTexture(gl.TEXTURE_2D, null);
 }
 
 function currentFrameSource() {
@@ -407,73 +444,81 @@ function processOneFrame(updateVisuals) {
   ensureProcSizing(srcW, srcH);
   const src = currentFrameSource();
   if (!src) return false;
-  drawToProc(src);
-  flow.uploadFrame(procCanvas);
+  captureFrame(src);
   if (!state.hasFrameA) { state.hasFrameA = true; return false; }
 
-  const t0 = performance.now();
   const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
-  const dt = performance.now() - t0;
 
   if (updateVisuals) {
-    renderVisualization(flowTex);
-    updateOverlayAndStats(flowTex, dt);
+    presentFrame(flowTex);
   } else {
-    recordThroughput(dt);
-    pushAvgHistory(flow.lastAvgMag);
+    recordThroughput();
+    pushAvgHistory(flow.lastAvgMag * state.outScale);
   }
   return true;
 }
 
-function renderVisualization(flowTex) {
-  const mag = state.maxMag > 0 ? state.maxMag : Math.max(0.6, flow.lastPeakMag * 1.15, state.autoMaxMag);
-  state.autoMaxMag = state.autoMaxMag * 0.9 + mag * 0.1;
+/**
+ * One computed flow field -> full pipeline: upsample+scale it to output
+ * resolution, render it, then drive the overlay/stats/charts from the same
+ * (already correctly-scaled) data. Called once per processed frame pair.
+ */
+function presentFrame(flowTex) {
+  recordThroughput();
 
+  const peakOut = flow.lastPeakMag * state.outScale;
+  const mag = state.maxMag > 0 ? state.maxMag : Math.max(0.6, peakOut * 1.15, state.autoMaxMag);
+  state.autoMaxMag = state.autoMaxMag * 0.9 + mag * 0.1;
+  pushAvgHistory(flow.lastAvgMag * state.outScale);
+
+  const dispFlow = viz.getDisplayFlow(flowTex, state.outW, state.outH, state.outScale);
+  renderVisualization(dispFlow, mag);
+  updateOverlayAndStats(flowTex, mag);
+}
+
+function renderVisualization(dispFlow, mag) {
   if (state.displayMode === 'split') {
     GLU.bindTarget(gl, null);
     const half = glCanvas.width / 2;
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, 0, half, glCanvas.height);
-    viz.render('source', flow.rawB, mag, state.gamma, null);
+    viz.render('source', dispRawTarget, mag, state.gamma, null);
     gl.scissor(half, 0, glCanvas.width - half, glCanvas.height);
-    viz.render(state.colorMode, flowTex, mag, state.gamma, null);
+    viz.render(state.colorMode, dispFlow, mag, state.gamma, null);
     gl.disable(gl.SCISSOR_TEST);
   } else if (state.displayMode === 'blend' && state.colorMode !== 'source') {
-    viz.renderBlend(flow.rawB, flowTex, state.colorMode, mag, state.gamma, state.blendAlpha, null);
+    viz.renderBlend(dispRawTarget, dispFlow, state.colorMode, mag, state.gamma, state.blendAlpha, null);
   } else {
-    viz.render(state.colorMode, state.colorMode === 'source' ? flow.rawB : flowTex, mag, state.gamma, null);
+    viz.render(state.colorMode, state.colorMode === 'source' ? dispRawTarget : dispFlow, mag, state.gamma, null);
   }
 }
 
-function updateOverlayAndStats(flowTex, computeMs) {
-  recordThroughput(computeMs);
-  pushAvgHistory(flow.lastAvgMag);
-
+function updateOverlayAndStats(flowTex, mag) {
   if (state.showParticles) {
     Overlay.fadeTrails(overlayCtx, overlayCanvas.width, overlayCanvas.height, state.trailFade);
   } else {
     Overlay.clear(overlayCtx, overlayCanvas.width, overlayCanvas.height);
   }
 
-  // Grid readback drives arrows/particles AND the always-on histogram chart.
+  // Grid readback (already scaled to output-pixel units) drives arrows/particles
+  // AND the always-on histogram chart.
   const gridW = Math.max(6, Math.round(state.arrowDensity));
-  const gridH = Math.max(4, Math.round(gridW * (procCanvas.height / procCanvas.width)));
-  const grid = viz.readGrid(flowTex, gridW, gridH);
-  const mag = state.maxMag > 0 ? state.maxMag : state.autoMaxMag;
+  const gridH = Math.max(4, Math.round(gridW * (state.outH / state.outW)));
+  const grid = viz.readGrid(flowTex, gridW, gridH, state.outScale);
   if (state.showArrows) {
     Overlay.drawArrows(overlayCtx, grid, gridW, gridH, overlayCanvas.width, overlayCanvas.height, mag, 1.0);
   }
   if (state.showParticles) {
-    particles.step(grid, gridW, gridH, procCanvas.width, procCanvas.height, 26);
+    particles.step(grid, gridW, gridH, state.outW, state.outH, 26);
     particles.draw(overlayCtx, overlayCanvas.width, overlayCanvas.height);
   }
-  updateHistogram(grid);
+  updateHistogram(grid, mag);
 
   updateStatsUI();
   drawCharts();
 }
 
-function recordThroughput(computeMs) {
+function recordThroughput() {
   const now = performance.now();
   if (state.stats.lastFrameTime > 0) {
     const dt = now - state.stats.lastFrameTime;
@@ -490,9 +535,8 @@ function pushAvgHistory(v) {
   s.histFilled = Math.min(s.histFilled + 1, s.avgHistory.length);
 }
 
-function updateHistogram(grid) {
+function updateHistogram(grid, mag) {
   const bins = new Float32Array(state.stats.histBins.length);
-  const mag = state.maxMag > 0 ? state.maxMag : state.autoMaxMag;
   for (let i = 0; i < grid.length; i += 4) {
     const m = Math.hypot(grid[i], grid[i + 1]);
     let b = Math.floor((m / Math.max(mag, 1e-5)) * bins.length);
@@ -505,7 +549,7 @@ function updateHistogram(grid) {
 
 function updateStatsUI() {
   $('statFps').textContent = state.stats.fpsEMA.toFixed(1);
-  const avg = flow.lastAvgMag, peak = flow.lastPeakMag;
+  const avg = flow.lastAvgMag * state.outScale, peak = flow.lastPeakMag * state.outScale;
   if (state.calib.enabled && state.calib.px > 0) {
     const unitPerPx = state.calib.dist / state.calib.px;
     $('statAvg').textContent = (avg * state.sourceFps * unitPerPx).toFixed(3);
@@ -620,16 +664,16 @@ async function runStepLoop({ live, collectStats, maxFrames, onProgress }) {
   while ((live ? state.stepRunning : true) && frameIdx < total) {
     await VideoSource.seekTo(video, state.stepTime);
     ensureProcSizing(video.videoWidth, video.videoHeight);
-    drawToProc(video);
-    flow.uploadFrame(procCanvas);
+    captureFrame(video);
     if (state.hasFrameA) {
-      const t0 = performance.now();
       const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
-      const ms = performance.now() - t0;
-      if (live) { renderVisualization(flowTex); updateOverlayAndStats(flowTex, ms); }
-      else { recordThroughput(ms); pushAvgHistory(flow.lastAvgMag); }
+      if (live) { presentFrame(flowTex); }
+      else { recordThroughput(); pushAvgHistory(flow.lastAvgMag * state.outScale); }
       if (collectStats) {
-        results.push({ frame: frameIdx, t: state.stepTime, avg: flow.lastAvgMag, peak: flow.lastPeakMag });
+        results.push({
+          frame: frameIdx, t: state.stepTime,
+          avg: flow.lastAvgMag * state.outScale, peak: flow.lastPeakMag * state.outScale,
+        });
       }
     } else {
       state.hasFrameA = true;
@@ -655,15 +699,12 @@ function stepOnce(dir) {
   state.stepTime = Math.max(0, (state.video.currentTime || 0) + dir * dt);
   VideoSource.seekTo(state.video, state.stepTime).then(() => {
     ensureProcSizing(state.video.videoWidth, state.video.videoHeight);
-    drawToProc(state.video);
-    flow.uploadFrame(procCanvas);
+    captureFrame(state.video);
     const hadPrev = state.hasFrameA;
     state.hasFrameA = true;
     if (hadPrev) {
-      const t0 = performance.now();
       const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
-      renderVisualization(flowTex);
-      updateOverlayAndStats(flowTex, performance.now() - t0);
+      presentFrame(flowTex);
     }
     updateSeekUI();
   });
@@ -678,8 +719,7 @@ function onSeekBarInput(e) {
   state.hasFrameA = false;
   VideoSource.seekTo(state.video, t).then(() => {
     ensureProcSizing(state.video.videoWidth, state.video.videoHeight);
-    drawToProc(state.video);
-    flow.uploadFrame(procCanvas);
+    captureFrame(state.video);
     state.hasFrameA = true;
     updateSeekUI();
   });
@@ -709,6 +749,11 @@ function idleTick() {
 // ===================== ROI =====================
 
 function wireRoi() {
+  bindSlider('procScale', 'procScaleVal', (v) => {
+    state.procScale = v / 100;
+    ensureCurrentProcSizing();
+  }, (v) => `${Math.round(v)}%`);
+
   $('chkRoi').addEventListener('change', (e) => {
     if (!e.target.checked) { state.roi = null; ensureCurrentProcSizing(); Overlay.clear(roiCtx, roiCanvas.width, roiCanvas.height); }
     else toast(I18N.t('toastRoiOn'));
@@ -799,12 +844,17 @@ function wireAlgorithm() {
 }
 
 function applyPreset(p) {
-  state.algo = { ...p };
+  state.algo = { alpha: p.alpha, iterations: p.iterations, levels: p.levels };
   $('alpha').value = p.alpha; $('alphaVal').textContent = p.alpha.toFixed(3);
   $('iterations').value = p.iterations; $('itersVal').textContent = String(p.iterations);
   $('pyrLevels').value = p.levels; $('levelsVal').textContent = String(p.levels);
+  if (p.scale !== undefined) {
+    state.procScale = p.scale;
+    $('procScale').value = Math.round(p.scale * 100);
+    $('procScaleVal').textContent = `${Math.round(p.scale * 100)}%`;
+  }
   state.hasFrameA = false;
-  if (state.sourceType === 'images' && state.imagesReady) computeImagePair();
+  ensureCurrentProcSizing();
 }
 
 function markCustomPreset() {
@@ -812,7 +862,7 @@ function markCustomPreset() {
     state.preset = 'custom';
     $('algoPreset').value = 'custom';
   }
-  if (state.sourceType === 'images' && state.imagesReady) computeImagePair();
+  ensureCurrentProcSizing();
 }
 
 function bindSlider(inputId, labelId, onChange, fmt) {
@@ -952,17 +1002,17 @@ function stopRecording() {
 
 function exportGridData(kind) {
   if (!state.hasFrameA || !state.sourceType) { toast(I18N.t('toastNoSource'), true); return; }
-  const gridW = 40, gridH = Math.max(4, Math.round(gridW * (procCanvas.height / procCanvas.width)));
+  const gridW = 40, gridH = Math.max(4, Math.round(gridW * (state.outH / state.outW)));
   const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
-  const grid = viz.readGrid(flowTex, gridW, gridH);
+  const grid = viz.readGrid(flowTex, gridW, gridH, state.outScale);
   if (kind === 'csv') {
     let csv = 'x_px,y_px,vx_px_per_frame,vy_px_per_frame,magnitude\n';
     for (let gy = 0; gy < gridH; gy++) {
       for (let gx = 0; gx < gridW; gx++) {
         const idx = (gy * gridW + gx) * 4;
         const vx = grid[idx], vy = grid[idx + 1];
-        const px = (gx / (gridW - 1)) * procCanvas.width;
-        const py = (gy / (gridH - 1)) * procCanvas.height;
+        const px = (gx / (gridW - 1)) * state.outW;
+        const py = (gy / (gridH - 1)) * state.outH;
         csv += `${px.toFixed(1)},${py.toFixed(1)},${vx.toFixed(4)},${vy.toFixed(4)},${Math.hypot(vx, vy).toFixed(4)}\n`;
       }
     }
@@ -979,7 +1029,8 @@ function exportGridData(kind) {
     }
     const payload = {
       generatedAt: new Date().toISOString(),
-      processingResolution: [procCanvas.width, procCanvas.height],
+      outputResolution: [state.outW, state.outH],
+      computeResolution: [state.procW, state.procH],
       gridSize: [gridW, gridH],
       sourceFps: state.sourceFps,
       algorithm: { name: 'pyramidal-horn-schunck', ...state.algo },

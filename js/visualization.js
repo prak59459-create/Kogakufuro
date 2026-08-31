@@ -18,6 +18,9 @@ class FlowVisualizer {
     this.gridTarget = null;
     this.gridW = 0;
     this.gridH = 0;
+    this.dispFlowTarget = null;
+    this.dispFlowW = 0;
+    this.dispFlowH = 0;
   }
 
   /** Render the flow field to the canvas (or `target` if given). mode: 'wheel' | 'heatmap' | 'source' */
@@ -61,7 +64,7 @@ class FlowVisualizer {
    * Downsample the flow field to a small gridW x gridH grid and read it back
    * to the CPU. Returns a Float32Array of length gridW*gridH*4 (rgba, use .rg).
    */
-  readGrid(flowTarget, gridW, gridH) {
+  readGrid(flowTarget, gridW, gridH, scale) {
     const gl = this.gl;
     if (!this.gridTarget || this.gridW !== gridW || this.gridH !== gridH) {
       if (this.gridTarget) {
@@ -76,11 +79,39 @@ class FlowVisualizer {
     GLU.drawFullscreen(gl, this.progResample, this.vao, () => {
       GLU.bindInputTexture(gl, 0, flowTarget.tex, this.progResample, 'u_src');
       gl.uniform2i(this.progResample.uniforms.u_srcSize, flowTarget.width, flowTarget.height);
+      gl.uniform1f(this.progResample.uniforms.u_scale, scale === undefined ? 1.0 : scale);
     });
     const out = new Float32Array(gridW * gridH * 4);
     gl.readPixels(0, 0, gridW, gridH, gl.RGBA, gl.FLOAT, out);
     GLU.bindTarget(gl, null);
     return out;
+  }
+
+  /**
+   * Resample a (small, compute-resolution) flow field up to the full output
+   * resolution, scaling displacement values by `scale` (outputRes/computeRes)
+   * so the color mapping and downstream stats stay in output-pixel units.
+   * This is what keeps the rendered result close to source-image sharpness
+   * even when the solver itself runs at a much smaller internal resolution.
+   */
+  getDisplayFlow(flowTarget, outW, outH, scale) {
+    const gl = this.gl;
+    if (!this.dispFlowTarget || this.dispFlowW !== outW || this.dispFlowH !== outH) {
+      if (this.dispFlowTarget) {
+        gl.deleteTexture(this.dispFlowTarget.tex);
+        gl.deleteFramebuffer(this.dispFlowTarget.fbo);
+      }
+      this.dispFlowTarget = GLU.createTarget(gl, outW, outH, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
+      this.dispFlowW = outW;
+      this.dispFlowH = outH;
+    }
+    GLU.bindTarget(gl, this.dispFlowTarget);
+    GLU.drawFullscreen(gl, this.progResample, this.vao, () => {
+      GLU.bindInputTexture(gl, 0, flowTarget.tex, this.progResample, 'u_src');
+      gl.uniform2i(this.progResample.uniforms.u_srcSize, flowTarget.width, flowTarget.height);
+      gl.uniform1f(this.progResample.uniforms.u_scale, scale);
+    });
+    return this.dispFlowTarget;
   }
 
   dispose() {
@@ -92,6 +123,10 @@ class FlowVisualizer {
     if (this.gridTarget) {
       gl.deleteTexture(this.gridTarget.tex);
       gl.deleteFramebuffer(this.gridTarget.fbo);
+    }
+    if (this.dispFlowTarget) {
+      gl.deleteTexture(this.dispFlowTarget.tex);
+      gl.deleteFramebuffer(this.dispFlowTarget.fbo);
     }
   }
 }
