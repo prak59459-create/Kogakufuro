@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Kogakufuro | 光学フロー解析 — 全処理ブラウザ内完結</title>
+<meta name="description" content="動画・Webカメラ・静止画2枚から光学フロー(オプティカルフロー)をGPU(WebGL2)でその場で解析。全処理は端末内で完結し、映像は一切サーバーへ送信されません。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌀</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="app" class="app">
+
+  <!-- ===================== HEADER ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">🌀</span>
+      <div class="brand-text">
+        <h1>Kogakufuro</h1>
+        <span class="brand-sub" data-i18n="brandSub">光学フロー解析 — 端末内完結・最大1000fps対応</span>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span class="privacy-pill" title="解析は全てブラウザ内で完結します">
+        <span class="dot"></span>
+        <span data-i18n="privacyPill">100% ローカル処理</span>
+      </span>
+      <button id="btnLang" class="chip-btn" type="button">EN</button>
+      <button id="btnTheme" class="chip-btn" type="button" title="テーマ切替">🌓</button>
+      <button id="btnFullscreen" class="chip-btn" type="button" title="フルスクリーン">⛶</button>
+      <button id="btnHelp" class="chip-btn" type="button" title="ヘルプ / ショートカット">?</button>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- ===================== SIDEBAR ===================== -->
+    <aside class="sidebar" id="sidebar">
+
+      <!-- INPUT -->
+      <section class="panel">
+        <h2 data-i18n="secInput">1. 入力ソース</h2>
+        <div class="tabs" id="sourceTabs">
+          <button class="tab active" data-source="video" data-i18n="tabVideo">動画ファイル</button>
+          <button class="tab" data-source="webcam" data-i18n="tabWebcam">Webカメラ</button>
+          <button class="tab" data-source="images" data-i18n="tabImages">静止画2枚</button>
+        </div>
+
+        <div class="source-pane active" data-pane="video">
+          <div id="dropZone" class="dropzone">
+            <p data-i18n="dropHint">動画をドラッグ&ドロップ<br>またはクリックして選択</p>
+            <input type="file" id="fileVideo" accept="video/*" hidden>
+          </div>
+          <div class="hint small" data-i18n="videoHint">高速度カメラで撮影した動画(240/480/1000fps等)も読み込めます。実際のfpsは下の「ソースfps」で指定してください。</div>
+        </div>
+
+        <div class="source-pane" data-pane="webcam">
+          <button id="btnWebcamStart" class="btn primary block" data-i18n="webcamStart">カメラを起動</button>
+          <button id="btnWebcamStop" class="btn block" data-i18n="webcamStop" hidden>カメラを停止</button>
+          <select id="camSelect" class="select" hidden></select>
+        </div>
+
+        <div class="source-pane" data-pane="images">
+          <label class="field-label" data-i18n="imageA">画像 A（前）</label>
+          <input type="file" id="fileImageA" accept="image/*" class="file-input">
+          <label class="field-label" data-i18n="imageB">画像 B（後）</label>
+          <input type="file" id="fileImageB" accept="image/*" class="file-input">
+          <button id="btnSwapImages" class="btn block" data-i18n="swapImages">A / B を入れ替え</button>
+        </div>
+      </section>
+
+      <!-- PLAYBACK & FRAME RATE -->
+      <section class="panel">
+        <h2 data-i18n="secPlayback">2. 再生 / フレームレート</h2>
+        <div class="row">
+          <button id="btnPlayPause" class="btn primary" data-i18n="play">▶ 再生</button>
+          <button id="btnStepBack" class="btn" title="1フレーム戻る">⏮</button>
+          <button id="btnStepFwd" class="btn" title="1フレーム進む">⏭</button>
+          <label class="checkbox inline"><input type="checkbox" id="chkLoop" checked><span data-i18n="loop">ループ</span></label>
+        </div>
+        <input type="range" id="seekBar" class="range" min="0" max="1000" value="0" step="1">
+        <div class="row between small mono">
+          <span id="timeLabel">00:00 / 00:00</span>
+          <span id="frameLabel">frame 0</span>
+        </div>
+
+        <div class="field">
+          <label data-i18n="procMode">解析モード</label>
+          <div class="segmented" id="procModeSeg">
+            <button class="seg active" data-mode="realtime" data-i18n="modeRealtime">リアルタイム</button>
+            <button class="seg" data-mode="step" data-i18n="modeStep">ステップ解析（〜1000fps）</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label data-i18n="sourceFps">ソースfps（撮影時の実際のフレームレート）</label>
+          <div class="row">
+            <input type="number" id="sourceFps" class="input num" min="1" max="1000" value="30">
+            <select id="fpsPreset" class="select">
+              <option value="30">30</option>
+              <option value="60">60</option>
+              <option value="120">120</option>
+              <option value="240">240</option>
+              <option value="480">480</option>
+              <option value="960">960</option>
+              <option value="1000">1000</option>
+            </select>
+          </div>
+          <div class="hint small" data-i18n="sourceFpsHint">正確な移動速度（px/s・実距離/s）の算出に使用します。ステップ解析モードでは、この値の間隔で動画を厳密にコマ送りして1フレームずつ解析します。</div>
+        </div>
+      </section>
+
+      <!-- ROI & RESOLUTION -->
+      <section class="panel">
+        <h2 data-i18n="secRoi">3. 解析範囲 / 解像度</h2>
+        <label class="checkbox"><input type="checkbox" id="chkRoi"><span data-i18n="roiEnable">ROI（解析範囲）を指定する — キャンバス上をドラッグ</span></label>
+        <button id="btnRoiReset" class="btn small" data-i18n="roiReset">ROIをリセット</button>
+
+        <div class="field">
+          <label><span data-i18n="procScale">処理解像度スケール</span>: <span id="procScaleVal">100%</span></label>
+          <input type="range" id="procScale" class="range" min="15" max="100" value="100" step="5">
+          <div class="hint small" data-i18n="procScaleHint">下げるほど高速化（1000fps級のステップ解析にはスケールを下げるのがおすすめ）</div>
+        </div>
+      </section>
+
+      <!-- ALGORITHM -->
+      <section class="panel">
+        <h2 data-i18n="secAlgo">4. アルゴリズム（Pyramidal Horn–Schunck）</h2>
+        <div class="field">
+          <label data-i18n="preset">プリセット</label>
+          <select id="algoPreset" class="select">
+            <option value="balanced" data-i18n="presetBalanced">バランス</option>
+            <option value="fast" data-i18n="presetFast">高速</option>
+            <option value="precise" data-i18n="presetPrecise">高精度</option>
+            <option value="fluid" data-i18n="presetFluid">流体・煙</option>
+            <option value="sports" data-i18n="presetSports">スポーツ / スローモーション</option>
+            <option value="custom" data-i18n="presetCustom">カスタム</option>
+          </select>
+        </div>
+        <div class="field">
+          <label><span data-i18n="alpha">平滑化の強さ α</span>: <span id="alphaVal">0.05</span></label>
+          <input type="range" id="alpha" class="range" min="0.005" max="0.4" value="0.05" step="0.005">
+        </div>
+        <div class="field">
+          <label><span data-i18n="iterations">反復回数</span>: <span id="itersVal">40</span></label>
+          <input type="range" id="iterations" class="range" min="5" max="150" value="40" step="1">
+        </div>
+        <div class="field">
+          <label><span data-i18n="pyrLevels">ピラミッド段数</span>: <span id="levelsVal">4</span></label>
+          <input type="range" id="pyrLevels" class="range" min="1" max="7" value="4" step="1">
+        </div>
+      </section>
+
+      <!-- VISUALIZATION -->
+      <section class="panel">
+        <h2 data-i18n="secViz">5. 可視化</h2>
+        <div class="field">
+          <label data-i18n="colorMode">カラーモード</label>
+          <div class="segmented" id="colorModeSeg">
+            <button class="seg active" data-mode="wheel" data-i18n="modeWheel">方向ホイール</button>
+            <button class="seg" data-mode="heatmap" data-i18n="modeHeatmap">速さヒートマップ</button>
+            <button class="seg" data-mode="source" data-i18n="modeSource">元映像</button>
+          </div>
+        </div>
+        <div class="field">
+          <label data-i18n="displayMode">表示レイアウト</label>
+          <div class="segmented" id="displayModeSeg">
+            <button class="seg active" data-mode="flow" data-i18n="displayFlow">フローのみ</button>
+            <button class="seg" data-mode="split" data-i18n="displaySplit">分割表示</button>
+            <button class="seg" data-mode="blend" data-i18n="displayBlend">重ね合わせ</button>
+          </div>
+        </div>
+        <div class="field" id="blendField" hidden>
+          <label><span data-i18n="blendAlpha">重ね合わせ不透明度</span>: <span id="blendAlphaVal">60%</span></label>
+          <input type="range" id="blendAlpha" class="range" min="0" max="100" value="60" step="1">
+        </div>
+        <div class="field">
+          <label><span data-i18n="maxMag">色スケール最大値</span>: <span id="maxMagVal">自動</span></label>
+          <input type="range" id="maxMag" class="range" min="0" max="60" value="0" step="0.5">
+        </div>
+        <div class="field">
+          <label><span data-i18n="gamma">ガンマ</span>: <span id="gammaVal">0.7</span></label>
+          <input type="range" id="gamma" class="range" min="0.2" max="2.5" value="0.7" step="0.05">
+        </div>
+        <label class="checkbox"><input type="checkbox" id="chkArrows"><span data-i18n="showArrows">矢印グリッドを表示</span></label>
+        <div class="field indent" id="arrowField" hidden>
+          <label><span data-i18n="arrowDensity">密度</span>: <span id="arrowDensityVal">28</span></label>
+          <input type="range" id="arrowDensity" class="range" min="8" max="64" value="28" step="1">
+        </div>
+        <label class="checkbox"><input type="checkbox" id="chkParticles"><span data-i18n="showParticles">流線パーティクルを表示</span></label>
+        <div class="field indent" id="particleField" hidden>
+          <label><span data-i18n="particleCount">粒子数</span>: <span id="particleCountVal">600</span></label>
+          <input type="range" id="particleCount" class="range" min="50" max="3000" value="600" step="50">
+          <label><span data-i18n="trailFade">トレイルの残り方</span>: <span id="trailFadeVal">0.12</span></label>
+          <input type="range" id="trailFade" class="range" min="0.02" max="0.6" value="0.12" step="0.01">
+        </div>
+      </section>
+
+      <!-- CALIBRATION -->
+      <section class="panel">
+        <h2 data-i18n="secCalib">6. 実寸キャリブレーション</h2>
+        <label class="checkbox"><input type="checkbox" id="chkCalib"><span data-i18n="calibEnable">実距離換算を有効化</span></label>
+        <div class="field indent" id="calibField" hidden>
+          <label data-i18n="calibPx">基準ピクセル数</label>
+          <input type="number" id="calibPx" class="input num" min="1" value="100">
+          <label data-i18n="calibDist">実距離</label>
+          <div class="row">
+            <input type="number" id="calibDist" class="input num" min="0" step="0.001" value="1">
+            <select id="calibUnit" class="select">
+              <option value="mm">mm</option>
+              <option value="cm" selected>cm</option>
+              <option value="m">m</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <!-- EXPORT -->
+      <section class="panel">
+        <h2 data-i18n="secExport">7. エクスポート</h2>
+        <button id="btnSnapshot" class="btn block" data-i18n="exportPng">現在のフレームをPNG保存</button>
+        <button id="btnRecord" class="btn block" data-i18n="exportRecStart">録画開始（WebM）</button>
+        <button id="btnExportCsv" class="btn block" data-i18n="exportCsv">フローデータをCSV書き出し</button>
+        <button id="btnExportJson" class="btn block" data-i18n="exportJson">フローデータをJSON書き出し</button>
+        <button id="btnBatchAnalyze" class="btn block" data-i18n="batchAnalyze">全フレーム一括解析（統計CSV）</button>
+        <div class="progress" id="batchProgress" hidden><div class="progress-bar" id="batchProgressBar"></div></div>
+      </section>
+
+    </aside>
+
+    <!-- ===================== MAIN STAGE ===================== -->
+    <main class="stage">
+      <div class="stage-toolbar">
+        <div class="stat-chip"><span data-i18n="statFps">処理速度</span> <b id="statFps">0.0</b> fps</div>
+        <div class="stat-chip"><span data-i18n="statAvg">平均速さ</span> <b id="statAvg">0.00</b> <span id="statAvgUnit">px/f</span></div>
+        <div class="stat-chip"><span data-i18n="statPeak">最大速さ</span> <b id="statPeak">0.00</b> <span id="statPeakUnit">px/f</span></div>
+        <div class="stat-chip"><span data-i18n="statRes">処理解像度</span> <b id="statRes">–</b></div>
+      </div>
+
+      <div class="canvas-wrap" id="canvasWrap">
+        <video id="hiddenVideo" hidden playsinline muted></video>
+        <canvas id="glCanvas" class="layer"></canvas>
+        <canvas id="overlayCanvas" class="layer"></canvas>
+        <canvas id="roiCanvas" class="layer"></canvas>
+        <div id="emptyState" class="empty-state">
+          <div class="empty-icon">🌀</div>
+          <p data-i18n="emptyTitle">入力ソースを選択してください</p>
+          <p class="small" data-i18n="emptySub">動画ファイル・Webカメラ・静止画2枚のいずれかから開始できます。すべての処理はこの端末内だけで行われます。</p>
+        </div>
+        <canvas id="legendCanvas" class="legend" width="72" height="72"></canvas>
+        <button id="btnExitFullscreen" class="chip-btn fs-exit" type="button" hidden title="フルスクリーン終了 (F / Esc)">✕ ⛶</button>
+      </div>
+
+      <div class="charts">
+        <div class="chart-box">
+          <div class="chart-title" data-i18n="chartHistory">速さの時間変化</div>
+          <canvas id="sparklineCanvas" width="480" height="70"></canvas>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title" data-i18n="chartHist">速さの分布</div>
+          <canvas id="histogramCanvas" width="480" height="70"></canvas>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <span data-i18n="footerPrivacy">🔒 すべての解析処理はこの端末のブラウザ（WebGL2）内で完結します。動画・画像・カメラ映像がサーバーへ送信されることは一切ありません。</span>
+  </footer>
+
+  <!-- ===================== HELP MODAL ===================== -->
+  <div id="helpModal" class="modal-backdrop" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3 data-i18n="helpTitle">ヘルプ / キーボードショートカット</h3>
+        <button id="btnHelpClose" class="chip-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <ul class="kbd-list">
+          <li><kbd>Space</kbd><span data-i18n="kbdSpace">再生 / 一時停止</span></li>
+          <li><kbd>←</kbd> / <kbd>→</kbd><span data-i18n="kbdStep">1フレーム戻る / 進む</span></li>
+          <li><kbd>F</kbd><span data-i18n="kbdFullscreen">フルスクリーン切替</span></li>
+          <li><kbd>S</kbd><span data-i18n="kbdSnapshot">PNGスナップショット保存</span></li>
+          <li><kbd>R</kbd><span data-i18n="kbdRoi">ROI選択のON/OFF</span></li>
+        </ul>
+        <p class="hint small" data-i18n="helpAlgo">アルゴリズム: ピラミッド型 Horn–Schunck 密光学フロー。フレームをGPU上でグレースケール化 → 複数解像度のピラミッドを構築 → 最も粗い階層から反復的にエネルギー最小化(ヤコビ法)で解を求め、順に高解像度へアップサンプリングしながら精緻化します。全計算はWebGL2のフラグメントシェーダ上で実行され、映像データが端末外に出ることはありません。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/gl-utils.js"></script>
+<script src="js/shaders.js"></script>
+<script src="js/optical-flow.js"></script>
+<script src="js/visualization.js"></script>
+<script src="js/overlay.js"></script>
+<script src="js/video-source.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
