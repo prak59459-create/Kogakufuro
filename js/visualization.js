@@ -14,6 +14,7 @@ class FlowVisualizer {
     this.progCopy = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_COPY);
     this.progBlend = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_COLORIZE_BLEND);
     this.progResample = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_RESAMPLE_FLOW);
+    this.progInterpolate = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_INTERPOLATE);
     this.vao = GLU.createFullscreenVAO(gl, 0);
     this.gridTarget = null;
     this.gridW = 0;
@@ -57,6 +58,26 @@ class FlowVisualizer {
       gl.uniform1f(this.progBlend.uniforms.u_gamma, gamma);
       gl.uniform1f(this.progBlend.uniforms.u_alpha, alpha);
       gl.uniform1i(this.progBlend.uniforms.u_mode, mode === 'heatmap' ? 1 : 0);
+    });
+  }
+
+  /**
+   * Synthesize the in-between frame at phase t (0=frameA, 1=frameB) by
+   * motion-compensated warping along `flowTarget` (must already be in the
+   * same pixel-unit space as frameA/frameB, e.g. the getDisplayFlow output).
+   * This is the core of the FPS-raising frame-interpolation feature.
+   */
+  renderInterpolated(frameA, frameB, flowTarget, t, target) {
+    const gl = this.gl;
+    const w = target ? target.width : gl.canvas.width;
+    const h = target ? target.height : gl.canvas.height;
+    GLU.bindTarget(gl, target || null);
+    GLU.drawFullscreen(gl, this.progInterpolate, this.vao, () => {
+      GLU.bindInputTexture(gl, 0, frameA.tex, this.progInterpolate, 'u_frameA');
+      GLU.bindInputTexture(gl, 1, frameB.tex, this.progInterpolate, 'u_frameB');
+      GLU.bindInputTexture(gl, 2, flowTarget.tex, this.progInterpolate, 'u_flow');
+      gl.uniform2f(this.progInterpolate.uniforms.u_texel, 1 / w, 1 / h);
+      gl.uniform1f(this.progInterpolate.uniforms.u_t, t);
     });
   }
 
@@ -117,7 +138,7 @@ class FlowVisualizer {
   dispose() {
     const gl = this.gl;
     gl.deleteVertexArray(this.vao);
-    for (const p of [this.progWheel, this.progHeatmap, this.progCopy, this.progBlend, this.progResample]) {
+    for (const p of [this.progWheel, this.progHeatmap, this.progCopy, this.progBlend, this.progResample, this.progInterpolate]) {
       gl.deleteProgram(p.program);
     }
     if (this.gridTarget) {

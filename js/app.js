@@ -64,6 +64,8 @@ const state = {
   stats: {
     fpsEMA: 0,
     lastFrameTime: 0,
+    renderFpsEMA: 0,
+    lastRenderTime: 0,
     avgHistory: new Float32Array(240),
     histIndex: 0,
     histFilled: 0,
@@ -76,12 +78,22 @@ const state = {
   procW: 0, procH: 0,   // internal compute resolution (speed knob, can be tiny)
   outW: 0, outH: 0,     // output/display resolution (kept as close to the source as possible)
   outScale: 1,          // outW/procW — converts compute-resolution flow values to output-resolution units
+
+  // Optical-flow frame interpolation (raises the effective FPS by synthesizing
+  // in-between frames from the already-computed flow field).
+  targetFps: 240,
+  interpSmooth: false,      // live "smooth playback" preview toggle
+  interpFlowReady: false,   // do we have a real frame pair + flow field to interpolate between?
+  interpDispFlow: null,     // last computed display-resolution flow field (GLU target)
+  interpLastCaptureTime: 0, // performance.now() at the last real captured frame
+  interpSynthCount: 0,
+  interpExportRunning: false,
 };
 
 const MAX_OUTPUT_DIM = 2048; // sanity cap so a 4K/8K source can't blow up GPU memory
 
 let gl, glCanvas, overlayCanvas, overlayCtx, roiCanvas, roiCtx, canvasWrap;
-let flow, viz, particles, procCanvas, procCtx, dispCanvas, dispCtx, dispRawTarget;
+let flow, viz, particles, procCanvas, procCtx, dispCanvas, dispCtx, dispRawA, dispRawB;
 
 // ===================== INIT =====================
 
@@ -113,7 +125,8 @@ function init() {
   procCtx = procCanvas.getContext('2d', { willReadFrequently: false });
   dispCanvas = document.createElement('canvas');
   dispCtx = dispCanvas.getContext('2d', { willReadFrequently: false });
-  dispRawTarget = GLU.createTarget(gl, 8, 8, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+  dispRawA = GLU.createTarget(gl, 8, 8, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+  dispRawB = GLU.createTarget(gl, 8, 8, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
 
   const savedTheme = localStorage.getItem('kogakufuro-theme');
   if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
@@ -133,6 +146,7 @@ function init() {
   wireVisualization();
   wireCalibration();
   wireExport();
+  wireInterpolation();
   wireKeyboard();
 
   window.addEventListener('resize', fitCanvasToContainer);
@@ -229,6 +243,7 @@ function stopEverything() {
   if (state.video) { state.video.pause(); state.video = null; }
   state.hasFrameA = false;
   state.imagesReady = false;
+  state.interpFlowReady = false;
   stopRecording();
   refreshDynamicLabels();
 }
@@ -383,7 +398,8 @@ function ensureProcSizing(srcW, srcH) {
     glCanvas.width = ow; glCanvas.height = oh;
     overlayCanvas.width = ow; overlayCanvas.height = oh;
     roiCanvas.width = ow; roiCanvas.height = oh;
-    GLU.resizeTarget(gl, dispRawTarget, ow, oh);
+    GLU.resizeTarget(gl, dispRawA, ow, oh);
+    GLU.resizeTarget(gl, dispRawB, ow, oh);
   }
   const resized = flow.setSize(pw, ph, state.algo.levels);
   if (resized) state.hasFrameA = false;
@@ -428,7 +444,11 @@ function captureFrame(source) {
   dispCtx.drawImage(source, sx, sy, sw, sh, 0, 0, dispCanvas.width, dispCanvas.height);
   procCtx.drawImage(dispCanvas, 0, 0, dispCanvas.width, dispCanvas.height, 0, 0, procCanvas.width, procCanvas.height);
   flow.uploadFrame(procCanvas);
-  gl.bindTexture(gl.TEXTURE_2D, dispRawTarget.tex);
+  // Ping-pong the full-res raw textures the same way flow.uploadFrame ping-pongs
+  // its own internal ones, so both the previous and current full-res frame stay
+  // available (needed for motion-compensated frame interpolation).
+  const tmp = dispRawA; dispRawA = dispRawB; dispRawB = tmp;
+  gl.bindTexture(gl.TEXTURE_2D, dispRawB.tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, dispCanvas);
   gl.bindTexture(gl.TEXTURE_2D, null);
 }
@@ -465,6 +485,7 @@ function processOneFrame(updateVisuals) {
  */
 function presentFrame(flowTex) {
   recordThroughput();
+  recordRenderThroughput();
 
   const peakOut = flow.lastPeakMag * state.outScale;
   const mag = state.maxMag > 0 ? state.maxMag : Math.max(0.6, peakOut * 1.15, state.autoMaxMag);
@@ -482,14 +503,14 @@ function renderVisualization(dispFlow, mag) {
     const half = glCanvas.width / 2;
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, 0, half, glCanvas.height);
-    viz.render('source', dispRawTarget, mag, state.gamma, null);
+    viz.render('source', dispRawB, mag, state.gamma, null);
     gl.scissor(half, 0, glCanvas.width - half, glCanvas.height);
     viz.render(state.colorMode, dispFlow, mag, state.gamma, null);
     gl.disable(gl.SCISSOR_TEST);
   } else if (state.displayMode === 'blend' && state.colorMode !== 'source') {
-    viz.renderBlend(dispRawTarget, dispFlow, state.colorMode, mag, state.gamma, state.blendAlpha, null);
+    viz.renderBlend(dispRawB, dispFlow, state.colorMode, mag, state.gamma, state.blendAlpha, null);
   } else {
-    viz.render(state.colorMode, state.colorMode === 'source' ? dispRawTarget : dispFlow, mag, state.gamma, null);
+    viz.render(state.colorMode, state.colorMode === 'source' ? dispRawB : dispFlow, mag, state.gamma, null);
   }
 }
 
@@ -526,6 +547,19 @@ function recordThroughput() {
     state.stats.fpsEMA = state.stats.fpsEMA === 0 ? instFps : state.stats.fpsEMA * 0.85 + instFps * 0.15;
   }
   state.stats.lastFrameTime = now;
+}
+
+/** Separate from recordThroughput: how many frames actually hit the screen per
+ * second, which — unlike the flow-compute rate — benefits from interpolation. */
+function recordRenderThroughput() {
+  const now = performance.now();
+  if (state.stats.lastRenderTime > 0) {
+    const dt = now - state.stats.lastRenderTime;
+    const instFps = 1000 / Math.max(dt, 0.001);
+    state.stats.renderFpsEMA = state.stats.renderFpsEMA === 0 ? instFps : state.stats.renderFpsEMA * 0.85 + instFps * 0.15;
+  }
+  state.stats.lastRenderTime = now;
+  $('statRenderFps').textContent = state.stats.renderFpsEMA.toFixed(1);
 }
 
 function pushAvgHistory(v) {
@@ -648,11 +682,57 @@ function startRealtime() {
   if (state.rafHandle) return;
   const tick = () => {
     if (!state.playing) { state.rafHandle = null; return; }
-    processOneFrame(true);
+    if (state.interpSmooth && state.sourceType !== 'images') {
+      interpTick();
+    } else {
+      processOneFrame(true);
+    }
     updateSeekUI();
     state.rafHandle = requestAnimationFrame(tick);
   };
   state.rafHandle = requestAnimationFrame(tick);
+}
+
+/**
+ * "Smooth playback" tick: only captures + computes flow when a new real
+ * source frame is actually due (every 1/sourceFps of wall-clock time);
+ * on every other rAF tick it just re-draws an interpolated in-between frame
+ * from the flow field already on hand. This decouples the (expensive) flow
+ * solve from the (cheap) render, so the screen can update faster than the
+ * source's real frame rate — the actual mechanism behind "raising the FPS".
+ */
+function interpTick() {
+  const [srcW, srcH] = currentSourceSize();
+  ensureProcSizing(srcW, srcH);
+  const src = currentFrameSource();
+  if (!src) return;
+
+  const now = performance.now();
+  const frameIntervalMs = 1000 / state.sourceFps;
+  const dueForNextFrame = !state.interpFlowReady || (now - state.interpLastCaptureTime) >= frameIntervalMs;
+
+  if (dueForNextFrame) {
+    captureFrame(src);
+    state.interpLastCaptureTime = now;
+    if (!state.hasFrameA) {
+      state.hasFrameA = true;
+      state.interpFlowReady = false;
+      return;
+    }
+    const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
+    recordThroughput();
+    pushAvgHistory(flow.lastAvgMag * state.outScale);
+    state.interpDispFlow = viz.getDisplayFlow(flowTex, state.outW, state.outH, state.outScale);
+    state.interpFlowReady = true;
+    updateStatsUI();
+  }
+
+  if (!state.interpFlowReady) return;
+  const t = Math.min(1, (performance.now() - state.interpLastCaptureTime) / frameIntervalMs);
+  viz.renderInterpolated(dispRawA, dispRawB, state.interpDispFlow, t, null);
+  Overlay.clear(overlayCtx, overlayCanvas.width, overlayCanvas.height);
+  state.interpSynthCount++;
+  recordRenderThroughput();
 }
 
 async function runStepLoop({ live, collectStats, maxFrames, onProgress }) {
@@ -1062,6 +1142,92 @@ async function runBatchAnalyze() {
   $('batchProgress').hidden = true;
   $('btnBatchAnalyze').disabled = false;
   toast(I18N.t('toastBatchDone'));
+}
+
+// ===================== FRAME INTERPOLATION (FPS UP) =====================
+
+function wireInterpolation() {
+  bindSlider('targetFps', 'targetFpsVal', (v) => { state.targetFps = Math.max(1, Math.round(v)); }, (v) => String(Math.round(v)));
+  $('targetFpsPreset').addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    state.targetFps = Number(e.target.value);
+    $('targetFps').value = state.targetFps;
+    $('targetFpsVal').textContent = String(state.targetFps);
+  });
+  $('chkInterpSmooth').addEventListener('change', (e) => {
+    state.interpSmooth = e.target.checked;
+    state.interpFlowReady = false;
+    if (!e.target.checked) Overlay.clear(overlayCtx, overlayCanvas.width, overlayCanvas.height);
+  });
+  $('btnInterpExport').addEventListener('click', exportInterpolatedVideo);
+}
+
+async function exportInterpolatedVideo() {
+  if (state.interpExportRunning) return;
+  if (state.sourceType !== 'video') { toast(I18N.t('toastNoSource'), true); return; }
+  pausePlayback();
+  state.interpExportRunning = true;
+  $('btnInterpExport').disabled = true;
+  $('interpProgress').hidden = false;
+
+  const video = state.video;
+  const K = Math.max(1, Math.round(state.targetFps / state.sourceFps));
+
+  const composite = document.createElement('canvas');
+  composite.width = glCanvas.width; composite.height = glCanvas.height;
+  const cctx = composite.getContext('2d');
+  const stream = composite.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+  let mimeType = 'video/webm;codecs=vp9';
+  if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+  const recorder = new MediaRecorder(stream, { mimeType });
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+  recorder.start();
+
+  const dt = 1 / state.sourceFps;
+  state.stepTime = 0;
+  state.hasFrameA = false;
+  let synthCount = 0;
+  const total = Math.ceil(video.duration / dt);
+
+  for (let frameIdx = 0; frameIdx < total; frameIdx++) {
+    await VideoSource.seekTo(video, state.stepTime);
+    ensureProcSizing(video.videoWidth, video.videoHeight);
+    captureFrame(video);
+    if (state.hasFrameA) {
+      const flowTex = flow.compute(state.algo.alpha, state.algo.iterations);
+      const dispFlow = viz.getDisplayFlow(flowTex, state.outW, state.outH, state.outScale);
+      for (let k = 0; k < K; k++) {
+        const t = k / K;
+        viz.renderInterpolated(dispRawA, dispRawB, dispFlow, t, null);
+        if (composite.width !== glCanvas.width || composite.height !== glCanvas.height) {
+          composite.width = glCanvas.width; composite.height = glCanvas.height;
+        }
+        cctx.drawImage(glCanvas, 0, 0);
+        if (typeof track.requestFrame === 'function') track.requestFrame();
+        synthCount++;
+        if (synthCount % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+      }
+    } else {
+      state.hasFrameA = true;
+    }
+    state.stepTime += dt;
+    $('interpProgressBar').style.width = `${Math.round(((frameIdx + 1) / total) * 100)}%`;
+  }
+
+  recorder.stop();
+  await stopped;
+  VideoSource.stopStream(stream);
+  downloadBlob(new Blob(chunks, { type: mimeType }), `kogakufuro-${state.targetFps}fps-${Date.now()}.webm`);
+
+  state.hasFrameA = false;
+  state.interpFlowReady = false;
+  state.interpExportRunning = false;
+  $('btnInterpExport').disabled = false;
+  $('interpProgress').hidden = true;
+  toast(`${I18N.t('toastInterpDone')} (${synthCount} ${I18N.t('framesWord')})`);
 }
 
 // ===================== KEYBOARD =====================

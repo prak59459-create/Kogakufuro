@@ -111,6 +111,32 @@
         </div>
       </section>
 
+      <!-- FRAME INTERPOLATION / FPS UP — the site's flagship feature -->
+      <section class="panel panel-featured">
+        <h2 data-i18n="secInterp">★ フレーム補間でFPS向上</h2>
+        <div class="hint small" data-i18n="interpHint">計算済みの光学フローを使い、実フレームの間に中間フレームを合成してなめらかさ(FPS)を引き上げます。</div>
+        <div class="field">
+          <label><span data-i18n="targetFps">目標FPS</span>: <span id="targetFpsVal">240</span></label>
+          <div class="row">
+            <input type="range" id="targetFps" class="range" min="10" max="1000" value="240" step="1">
+          </div>
+          <select id="targetFpsPreset" class="select">
+            <option value="">-</option>
+            <option value="60">60</option>
+            <option value="120">120</option>
+            <option value="240" selected>240</option>
+            <option value="480">480</option>
+            <option value="960">960</option>
+            <option value="1000">1000</option>
+          </select>
+        </div>
+        <label class="checkbox"><input type="checkbox" id="chkInterpSmooth"><span data-i18n="interpSmooth">スムーズ再生プレビュー(リアルタイム)</span></label>
+        <div class="hint small" data-i18n="interpSmoothHint">画面の更新頻度はディスプレイのリフレッシュレートまでが実質的な上限です。</div>
+        <button id="btnInterpExport" class="btn block primary" data-i18n="interpExport">スーパースローモーション書き出し（WebM）</button>
+        <div class="hint small" data-i18n="interpExportHint">動画全体を目標FPS相当のコマ密度で合成し、なめらかなスローモーション動画として書き出します。長い動画・高い目標FPSほど時間がかかります。</div>
+        <div class="progress" id="interpProgress" hidden><div class="progress-bar" id="interpProgressBar"></div></div>
+      </section>
+
       <!-- ROI & RESOLUTION -->
       <section class="panel">
         <h2 data-i18n="secRoi">3. 解析範囲 / 解像度</h2>
@@ -235,6 +261,7 @@
     <main class="stage">
       <div class="stage-toolbar">
         <div class="stat-chip"><span data-i18n="statFps">処理速度</span> <b id="statFps">0.0</b> fps</div>
+        <div class="stat-chip"><span data-i18n="statRenderFps">表示fps</span> <b id="statRenderFps">0.0</b> fps</div>
         <div class="stat-chip"><span data-i18n="statAvg">平均速さ</span> <b id="statAvg">0.00</b> <span id="statAvgUnit">px/f</span></div>
         <div class="stat-chip"><span data-i18n="statPeak">最大速さ</span> <b id="statPeak">0.00</b> <span id="statPeakUnit">px/f</span></div>
         <div class="stat-chip"><span data-i18n="statRes">処理解像度</span> <b id="statRes">–</b></div>

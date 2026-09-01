@@ -84,6 +84,18 @@ body{
 }
 .panel h2{font-size:12.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); margin:0 0 10px;}
 
+.panel-featured{
+  border:1px solid transparent;
+  background:
+    linear-gradient(var(--panel), var(--panel)) padding-box,
+    linear-gradient(135deg, var(--accent), var(--accent-2), var(--accent-3)) border-box;
+  box-shadow:var(--shadow), 0 0 24px -8px var(--accent);
+}
+.panel-featured h2{
+  color:transparent; background:linear-gradient(90deg,var(--accent),var(--accent-2));
+  -webkit-background-clip:text; background-clip:text; font-weight:700;
+}
+
 .field{margin-top:10px;}
 .field.indent{margin-left:4px; padding-left:10px; border-left:2px solid var(--panel-border);}
 .field-label{display:block; font-size:12px; color:var(--text-dim); margin:8px 0 4px;}

@@ -291,6 +291,29 @@ const SHADERS = (() => {
   void main() { outColor = texture(u_src, v_uv); }
   `;
 
+  // Optical-flow motion-compensated frame interpolation: synthesizes the frame
+  // at phase t (0=A, 1=B) between two real frames by backward-warping each one
+  // along the A->B flow field and cross-dissolving the results. This is what
+  // lets the app synthesize extra frames to raise a video's effective FPS.
+  const FRAG_INTERPOLATE = PRECISION + `
+  uniform sampler2D u_frameA;
+  uniform sampler2D u_frameB;
+  uniform sampler2D u_flow;   // displacement A->B, in output-pixel units
+  uniform vec2 u_texel;       // 1/width, 1/height of the output, to convert px flow to uv offset
+  uniform float u_t;
+  in vec2 v_uv;
+  out vec4 outColor;
+  void main() {
+    vec2 flowPx = texture(u_flow, v_uv).rg;
+    vec2 flowUv = flowPx * u_texel;
+    vec2 uvA = clamp(v_uv - u_t * flowUv, 0.0, 1.0);
+    vec2 uvB = clamp(v_uv + (1.0 - u_t) * flowUv, 0.0, 1.0);
+    vec3 colorA = texture(u_frameA, uvA).rgb;
+    vec3 colorB = texture(u_frameB, uvB).rgb;
+    outColor = vec4(mix(colorA, colorB, u_t), 1.0);
+  }
+  `;
+
   return {
     VERT_FULLSCREEN,
     FRAG_GRAYSCALE,
@@ -305,5 +328,6 @@ const SHADERS = (() => {
     FRAG_COLORIZE_BLEND,
     FRAG_COPY,
     FRAG_RESAMPLE_FLOW,
+    FRAG_INTERPOLATE,
   };
 })();
