@@ -1,8 +1,8 @@
 /*
- * video-source.js — loading/utility helpers for the three input kinds the
- * app supports: a video file, a webcam stream, or a still-image pair.
- * Keeps browser-API quirks (metadata loading, seek events, drag & drop) out
- * of app.js so the main controller can stay about *orchestration*.
+ * video-source.js — loading/utility helpers for the two input kinds the app
+ * supports: a video file or a webcam stream. Keeps browser-API quirks
+ * (metadata loading, seek events, drag & drop) out of app.js so the main
+ * controller can stay about *orchestration*.
  */
 'use strict';
 
@@ -37,21 +37,6 @@ const VideoSource = {
     });
     await video.play();
     return { video, stream };
-  },
-
-  /** Load a still image file into an HTMLImageElement. */
-  loadImageFile(file) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-      img.onload = () => resolve({ img, url, name: file.name });
-      img.onerror = () => reject(new Error('画像の読み込みに失敗しました / Failed to load image'));
-      img.src = url;
-    });
-  },
-
-  supportsRVFC(video) {
-    return typeof video.requestVideoFrameCallback === 'function';
   },
 
   /** Seek a video to an exact time and resolve once the frame is actually decoded. */

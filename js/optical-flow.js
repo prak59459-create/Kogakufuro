@@ -11,6 +11,10 @@
  *      repeat down to full resolution. This coarse-to-fine scheme lets the
  *      solver capture larger displacements than a single-scale solve would.
  *
+ * The flow field this produces drives frame interpolation (js/visualization.js
+ * renderInterpolated) — this module only computes the vector field, it does
+ * not know or care what the caller does with it.
+ *
  * Requires EXT_color_buffer_float (to render into RG32F/RGBA32F targets).
  * All resampling is done with manual texelFetch-based bilinear/box filters,
  * so no *_texture_float_linear extension is needed.
@@ -29,11 +33,9 @@ class OpticalFlowGL {
 
     this.progGrayscale = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_GRAYSCALE);
     this.progDownAvg = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_DOWNSAMPLE_AVG);
-    this.progDownMax = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_DOWNSAMPLE_MAX);
     this.progDeriv = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_DERIVATIVES);
     this.progIterate = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_HS_ITERATE);
     this.progUpsample = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_UPSAMPLE_FLOW);
-    this.progMagnitude = GLU.createProgram(gl, SHADERS.VERT_FULLSCREEN, SHADERS.FRAG_MAGNITUDE);
 
     this.vao = GLU.createFullscreenVAO(gl, 0);
 
@@ -47,10 +49,6 @@ class OpticalFlowGL {
     this.flowPong = [];
     this.rawA = null; // full-res raw RGBA upload targets (ping-pong across frames)
     this.rawB = null;
-    this.reduceChain = []; // magnitude reduction pyramid down to 1x1
-
-    this.lastAvgMag = 0;
-    this.lastPeakMag = 0;
   }
 
   _levelSize(level) {
@@ -81,21 +79,12 @@ class OpticalFlowGL {
       this.flowPing.push(GLU.createTarget(gl, w, h, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST));
       this.flowPong.push(GLU.createTarget(gl, w, h, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST));
     }
-
-    // Reduction chain (for avg/peak magnitude stats) starts at full res, halves to 1x1.
-    let rw = width, rh = height;
-    this.reduceChain.push(GLU.createTarget(gl, rw, rh, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST));
-    while (rw > 1 || rh > 1) {
-      rw = Math.max(1, Math.floor(rw / 2));
-      rh = Math.max(1, Math.floor(rh / 2));
-      this.reduceChain.push(GLU.createTarget(gl, rw, rh, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST));
-    }
     return true;
   }
 
   _dispose() {
     const gl = this.gl;
-    const all = [...this.pyrA, ...this.pyrB, ...this.deriv, ...this.flowPing, ...this.flowPong, ...this.reduceChain];
+    const all = [...this.pyrA, ...this.pyrB, ...this.deriv, ...this.flowPing, ...this.flowPong];
     if (this.rawA) all.push(this.rawA);
     if (this.rawB) all.push(this.rawB);
     for (const t of all) {
@@ -103,7 +92,7 @@ class OpticalFlowGL {
       gl.deleteFramebuffer(t.fbo);
     }
     this.pyrA = []; this.pyrB = []; this.deriv = [];
-    this.flowPing = []; this.flowPong = []; this.reduceChain = [];
+    this.flowPing = []; this.flowPong = [];
     this.rawA = null; this.rawB = null;
   }
 
@@ -183,7 +172,6 @@ class OpticalFlowGL {
    * measured in pixels-per-frame at the processing resolution).
    */
   compute(alpha, iterations) {
-    const gl = this.gl;
     const alpha2 = alpha * alpha;
 
     // 1. grayscale conversion at full res
@@ -218,50 +206,14 @@ class OpticalFlowGL {
       coarseFlow = ping; // holds the most recent result at this level
     }
 
-    this._computeStats(coarseFlow);
     return coarseFlow;
-  }
-
-  _computeStats(flowTarget) {
-    const gl = this.gl;
-    // magnitude of the final flow field
-    GLU.bindTarget(gl, this.reduceChain[0]);
-    GLU.drawFullscreen(gl, this.progMagnitude, this.vao, () => {
-      GLU.bindInputTexture(gl, 0, flowTarget.tex, this.progMagnitude, 'u_flow');
-    });
-
-    // average via repeated box downsample to 1x1
-    let avgSrc = this.reduceChain[0];
-    for (let i = 1; i < this.reduceChain.length; i++) {
-      this._downsample(this.progDownAvg, avgSrc, this.reduceChain[i]);
-      avgSrc = this.reduceChain[i];
-    }
-    const avgPixel = new Float32Array(4);
-    GLU.bindTarget(gl, avgSrc);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, avgPixel);
-    this.lastAvgMag = avgPixel[0];
-
-    // peak via repeated max downsample to 1x1 (reuse level-0 magnitude buffer as source)
-    // We need a second chain pass with MAX; reuse reduceChain buffers again (they're transient).
-    let maxSrc = this.reduceChain[0];
-    for (let i = 1; i < this.reduceChain.length; i++) {
-      this._downsample(this.progDownMax, maxSrc, this.reduceChain[i]);
-      maxSrc = this.reduceChain[i];
-    }
-    const maxPixel = new Float32Array(4);
-    GLU.bindTarget(gl, maxSrc);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, maxPixel);
-    this.lastPeakMag = maxPixel[0];
-
-    GLU.bindTarget(gl, null);
   }
 
   dispose() {
     this._dispose();
     const gl = this.gl;
     gl.deleteVertexArray(this.vao);
-    for (const p of [this.progGrayscale, this.progDownAvg, this.progDownMax, this.progDeriv,
-      this.progIterate, this.progUpsample, this.progMagnitude]) {
+    for (const p of [this.progGrayscale, this.progDownAvg, this.progDeriv, this.progIterate, this.progUpsample]) {
       gl.deleteProgram(p.program);
     }
   }
