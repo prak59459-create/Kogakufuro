@@ -632,6 +632,8 @@ async function exportInterpolatedVideo() {
   $('btnInterpExport').disabled = true;
   $('interpProgress').hidden = false;
   $('interpProgressBar').style.width = '0%';
+  $('interpProgressLabel').hidden = false;
+  $('interpProgressLabel').textContent = '';
 
   const video = state.video;
   ensureProcSizing(video.videoWidth, video.videoHeight);
@@ -643,6 +645,7 @@ async function exportInterpolatedVideo() {
     state.interpExportRunning = false;
     $('btnInterpExport').disabled = false;
     $('interpProgress').hidden = true;
+    $('interpProgressLabel').hidden = true;
     return;
   }
 
@@ -700,9 +703,10 @@ async function exportInterpolatedVideo() {
     videoEncoder.encode(vf, { keyFrame: i % keyFrameEvery === 0 });
     vf.close();
 
-    if (i % 3 === 0) {
+    if (i % 3 === 0 || i === totalFrames - 1) {
       await new Promise((r) => setTimeout(r, 0));
       $('interpProgressBar').style.width = `${Math.round(((i + 1) / totalFrames) * 100)}%`;
+      $('interpProgressLabel').textContent = `${I18N.t('interpProgressLabel')}: ${i + 1} / ${totalFrames}`;
     }
   }
 
@@ -714,6 +718,7 @@ async function exportInterpolatedVideo() {
   state.interpExportRunning = false;
   $('btnInterpExport').disabled = false;
   $('interpProgress').hidden = true;
+  $('interpProgressLabel').hidden = true;
 
   if (encodeError) {
     toast(String(encodeError.message || encodeError), true);
